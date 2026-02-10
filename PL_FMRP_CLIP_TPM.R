@@ -13,9 +13,9 @@ library(BiocManager)
 list(bam_files)
 
 # ==== 1. Set directories and files ====
-setwd("/Users/pedro/Desktop/PL fmrp clip all")
+setwd("/Users/PL fmrp clip all")
 bam_files <- list.files(pattern = "\\.bam$", full.names = TRUE)
-gtf_file  <- "/Users/pedro/Desktop/NDEL pan/Mus_musculus.GRCm39.113.gtf"
+gtf_file  <- "/Users/Mus_musculus.GRCm39.113.gtf"
 
 # ==== 2. Import GTF and extract features ====
 cat("Importing GTF...\n")
