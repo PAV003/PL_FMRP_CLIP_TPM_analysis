@@ -1,0 +1,634 @@
+ibrary(data.table)
+library(dplyr)
+library(tidyr)
+library(rtracklayer)
+library(tibble)
+library(biomaRt)
+
+setwd("")
+
+# -----------------------------
+# FIND ALL .uniqtagAnno.bed FILES IN THIS FOLDER
+# -----------------------------
+bed_files <- list.files(
+  path = ".",
+  pattern = "\\.uniqtagAnno\\.bed$",
+  full.names = TRUE
+)
+
+names(bed_files) <- basename(bed_files)
+
+# quick check
+print(bed_files)
+cat("Number of bed files found:", length(bed_files), "\n")
+
+# -----------------------------
+# BUILD file_info FOR ALL FILES
+# -----------------------------
+file_info <- data.frame(
+  sample = names(bed_files),
+  file = unname(bed_files),
+  stringsAsFactors = FALSE
+)
+
+write.csv(file_info, "file_info_allbeds.csv", row.names = FALSE)
+saveRDS(file_info, "file_info_allbeds.rds")
+
+print(file_info)
+
+# -----------------------------
+# USE ALL FILES
+# -----------------------------
+files <- setNames(file_info$file, file_info$sample)
+
+print(data.frame(sample = names(files), file = files, exists = file.exists(files)))
+
+# -----------------------------
+# GENE-LEVEL COUNT MATRIX FOR ALL BED FILES
+# -----------------------------
+count_list <- lapply(names(files), function(samp) {
+  df <- fread(files[[samp]])
+  
+  df %>%
+    dplyr::filter(!is.na(geneId), geneId != "") %>%
+    dplyr::count(geneId, name = samp)
+})
+
+names(count_list) <- names(files)
+
+gene_matrix <- Reduce(function(x, y) {
+  dplyr::full_join(x, y, by = "geneId")
+}, count_list)
+
+gene_matrix[is.na(gene_matrix)] <- 0
+
+write.csv(gene_matrix, "gene_count_matrix_fromAnno_ALLBEDS.csv", row.names = FALSE)
+
+# -----------------------------
+# GENE + REGION COUNT MATRIX FOR ALL BED FILES
+# -----------------------------
+count_list_region <- lapply(names(files), function(samp) {
+  df <- fread(files[[samp]])
+  
+  df %>%
+    dplyr::filter(!is.na(geneId), geneId != "") %>%
+    dplyr::mutate(Region = gsub(" \\(.*\\)", "", annotation)) %>%
+    dplyr::count(geneId, Region, name = samp)
+})
+
+names(count_list_region) <- names(files)
+
+gene_region_matrix <- Reduce(function(x, y) {
+  dplyr::full_join(x, y, by = c("geneId", "Region"))
+}, count_list_region)
+
+gene_region_matrix[is.na(gene_region_matrix)] <- 0
+
+write.csv(gene_region_matrix, "gene_region_count_matrix_fromAnno_ALLBEDS.csv", row.names = FALSE)
+
+# -----------------------------
+# SAVE TABLE OF FILES USED
+# -----------------------------
+write.csv(file_info, "samples_used_for_count_matrix_ALLBEDS.csv", row.names = FALSE)
+
+# -----------------------------
+# ADD GENE SYMBOLS FROM BIOMART
+# -----------------------------
+# Try a stable connection method
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "mmusculus_gene_ensembl",
+  host = "https://www.ensembl.org"
+)
+library(biomaRt)
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "mmusculus_gene_ensembl",
+  mirror = "useast"
+)
+gene_map <- getBM(
+  attributes = c("ensembl_gene_id", "mgi_symbol"),
+  filters = "ensembl_gene_id",
+  values = unique(gene_region_matrix$geneId),
+  mart = mart
+)
+
+gene_map <- gene_map %>%
+  dplyr::filter(mgi_symbol != "") %>%
+  dplyr::distinct(ensembl_gene_id, .keep_all = TRUE)
+
+write.csv(gene_map, "mouse_gene_map_ALLBEDS.csv", row.names = FALSE)
+
+# -----------------------------
+# GENE + REGION MATRIX WITH SYMBOLS
+# -----------------------------
+gene_region_matrix_symbols <- gene_region_matrix %>%
+  dplyr::left_join(gene_map, by = c("geneId" = "ensembl_gene_id")) %>%
+  dplyr::rename(SYMBOL = mgi_symbol) %>%
+  dplyr::relocate(SYMBOL, .after = geneId)
+
+write.csv(
+  gene_region_matrix_symbols,
+  "gene_region_count_matrix_with_symbols_ALLBEDS.csv",
+  row.names = FALSE
+)
+
+# -----------------------------
+# GENE-LEVEL MATRIX WITH SYMBOLS
+# -----------------------------
+gene_matrix_symbols <- gene_matrix %>%
+  dplyr::left_join(gene_map, by = c("geneId" = "ensembl_gene_id")) %>%
+  dplyr::rename(SYMBOL = mgi_symbol) %>%
+  dplyr::relocate(SYMBOL, .after = geneId)
+
+write.csv(
+  gene_matrix_symbols,
+  "genelevel_count_matrix_with_symbols_ALLBEDS.csv",
+  row.names = FALSE
+)
+
+# -----------------------------
+# QUICK CHECKS
+# -----------------------------
+cat("Gene-level matrix dimensions:", dim(gene_matrix_symbols), "\n")
+cat("Gene-region matrix dimensions:", dim(gene_region_matrix_symbols), "\n")
+
+head(gene_matrix_symbols)
+head(gene_region_matrix_symbols)
+
+#Metadata file --- 
+library(dplyr)
+
+setwd("")
+
+count_df <- read.csv("genelevel_count_matrix_with_symbols_ALLBEDS.csv", check.names = FALSE)
+
+sample_cols <- colnames(count_df)[!(colnames(count_df) %in% c("geneId", "SYMBOL"))]
+
+meta_auto <- data.frame(
+  sample = sample_cols,
+  stringsAsFactors = FALSE
+)
+
+# assign bait
+meta_auto$bait <- ifelse(grepl("^Pan|^P", meta_auto$sample), "Pan",
+                         ifelse(grepl("^Ndel|^D|^G|^R", meta_auto$sample), "Ndel", NA))
+
+# assign state
+meta_auto$state <- ifelse(grepl("R[0-9]|PR|PanR", meta_auto$sample), "Rest",
+                          ifelse(grepl("G[0-9]|PG|PanG|NdelG", meta_auto$sample), "Inhibit",
+
+                          
+                                 ifelse(grepl("D[0-9]|PD|PanD|NdelD", meta_auto$sample), "Active", NA)))
+
+meta_auto
+table(meta_auto$bait, meta_auto$state)
+
+write.csv(meta_auto, "sample_metadata.csv", row.names = FALSE)
+
+library(dplyr)
+library(tidyr)
+library(DESeq2)
+library(pheatmap)
+library(tibble)
+
+setwd("")
+
+# -----------------------------
+# 1) LOAD COUNT MATRIX
+# -----------------------------
+count_df_region <- read.csv("gene_region_count_matrix_with_symbols.csv", check.names = FALSE)
+
+unique(count_df_region$Region)
+table(count_df_region$Region)
+# -----------------------------
+# 2) LOAD SAMPLE METADATA
+# -----------------------------
+meta <- read.csv("sample_metadata.csv", stringsAsFactors = FALSE)
+
+# check metadata
+print(colnames(meta))
+print(head(meta))
+
+# Expecting columns like:
+# sample, file, bait, state
+# If sample column is missing, make it from file
+if (!"sample" %in% colnames(meta) & "file" %in% colnames(meta)) {
+  meta$sample <- meta$file
+}
+###------- 3 prime 5 prime FMRP binding------
+# -----------------------------
+# 3) KEEP ONLY SAMPLES THAT EXIST IN COUNT MATRIX
+# -----------------------------
+sample_cols <- colnames(count_df)[!(colnames(count_df) %in% c("geneId", "SYMBOL"))]
+
+meta2 <- meta %>%
+  dplyr::filter(sample %in% sample_cols)
+
+print(meta2[, c("sample", "bait", "state")])
+
+# optional: keep only Pan + Ndel
+meta2 <- meta2 %>%
+  dplyr::filter(bait %in% c("Pan", "Ndel"))
+
+# reorder to match metadata
+count_sub <- count_df %>%
+  dplyr::select(geneId, SYMBOL, all_of(meta2$sample))
+
+# -----------------------------
+# 4) BUILD COUNT MATRIX
+# -----------------------------
+count_mat <- as.data.frame(count_sub)
+rownames(count_mat) <- make.unique(ifelse(count_mat$SYMBOL == "" | is.na(count_mat$SYMBOL),
+                                          count_mat$geneId,
+                                          count_mat$SYMBOL))
+count_mat$geneId <- NULL
+count_mat$SYMBOL <- NULL
+
+count_mat <- as.matrix(count_mat)
+mode(count_mat) <- "numeric"
+
+# -----------------------------
+# 5) BUILD COLDATA
+# -----------------------------
+coldata <- meta2 %>%
+  dplyr::select(sample, bait, state) %>%
+  distinct()
+
+rownames(coldata) <- coldata$sample
+coldata$sample <- NULL
+
+# make sure order matches count matrix columns
+coldata <- coldata[colnames(count_mat), , drop = FALSE]
+
+# combined group label for annotation
+coldata$group <- paste(coldata$bait, coldata$state, sep = "_")
+
+print(coldata)
+
+# -----------------------------
+# 6) DESEQ TRANSFORM
+# -----------------------------
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_mat),
+  colData = coldata,
+  design = ~ bait + state
+)
+
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+
+dds <- estimateSizeFactors(dds, type = "poscounts")
+
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE)
+mat <- assay(vsd)
+
+library(pheatmap)
+library(dplyr)
+
+# ==========================================================
+# HEATMAP WORKFLOW FOR CLIP anno bed files
+# Requires:
+#   mat     = assay(vsd)
+#   coldata = sample metadata with columns bait and state
+# ==========================================================
+
+# -----------------------------
+# 0) STANDARDIZE METADATA
+# -----------------------------
+coldata <- as.data.frame(coldata)
+coldata$bait  <- as.character(coldata$bait)
+coldata$state <- as.character(coldata$state)
+
+# Your states are: Rest, Active, Inhibit
+coldata$group <- paste(coldata$bait, coldata$state, sep = "_")
+
+sample_order <- c(
+  "Pan_Rest", "Pan_Active", "Pan_Inhibit",
+  "Ndel_Rest", "Ndel_Active", "Ndel_Inhibit"
+)
+
+# Keep only samples with recognized groups
+keep_samples <- coldata$group %in% sample_order
+coldata <- coldata[keep_samples, , drop = FALSE]
+mat <- mat[, rownames(coldata), drop = FALSE]
+
+# Order replicate columns by desired biological order
+ord <- order(match(coldata$group, sample_order))
+coldata <- coldata[ord, , drop = FALSE]
+mat <- mat[, rownames(coldata), drop = FALSE]
+
+# Column annotation for replicate-level heatmaps
+annotation_col <- coldata[, c("bait", "state", "group"), drop = FALSE]
+
+# -----------------------------
+# 1) DEFINE AIS GENE LIST
+# -----------------------------
+ais_genes <- c(
+  "Trim46","Gabra3","Kcnb2","Cacna1b","Nfasc","Ank3","Cacna1a", "Scrib",
+  "Kcnq2","Scn8a","Cacna1e","Kcnq3","Gphn","Gabra2","Dlg2","Scn2a","Ndel1","Sptbn4","Kcna2"
+)
+
+ais_present <- intersect(ais_genes, rownames(mat))
+
+# -----------------------------
+# 2) HELPER FUNCTIONS
+# -----------------------------
+zscore_rows <- function(x) {
+  z <- t(scale(t(x)))
+  z[is.na(z)] <- 0
+  z
+}
+
+make_group_average <- function(mat, coldata, group_order) {
+  avg <- sapply(group_order, function(g) {
+    idx <- coldata$group == g
+    if (sum(idx) == 1) {
+      mat[, idx, drop = FALSE][, 1]
+    } else {
+      rowMeans(mat[, idx, drop = FALSE], na.rm = TRUE)
+    }
+  })
+  avg <- as.matrix(avg)
+  colnames(avg) <- group_order
+  avg
+}
+
+# -----------------------------
+# 3) HEATMAP 1:
+# TOP 100 GENES BY SAMPLE
+# -----------------------------
+rv <- apply(mat, 1, var, na.rm = TRUE)
+top100 <- names(sort(rv, decreasing = TRUE))[1:min(100, length(rv))]
+
+hm_top100_by_sample <- zscore_rows(mat[top100, , drop = FALSE])
+
+pheatmap::pheatmap(
+  hm_top100_by_sample,
+  annotation_col = annotation_col,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 6,
+  angle_col = 45,
+  main = "Top 100 CLIP genes by sample"
+)
+
+# -----------------------------
+# 4) HEATMAP 2:
+# AIS GENES BY SAMPLE
+# -----------------------------
+hm_ais_by_sample <- zscore_rows(mat[ais_present, , drop = FALSE])
+
+pheatmap::pheatmap(
+  hm_ais_by_sample,
+  annotation_col = annotation_col,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 9,
+  angle_col = 45,
+  main = "AIS / excitability genes by sample"
+)
+
+# -----------------------------
+# 5) BUILD AVERAGED MATRIX
+# -----------------------------
+mat_avg <- make_group_average(mat, coldata, sample_order)
+
+# -----------------------------
+# 6) HEATMAP 3:
+# TOP 100 GENES AVERAGED
+# -----------------------------
+rv_avg <- apply(mat_avg, 1, var, na.rm = TRUE)
+top100_avg <- names(sort(rv_avg, decreasing = TRUE))[1:min(100, length(rv_avg))]
+
+hm_top100_avg <- zscore_rows(mat_avg[top100_avg, , drop = FALSE])
+
+pheatmap::pheatmap(
+  hm_top100_avg,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 6,
+  angle_col = 45,
+  main = "Top 100 CLIP genes (group averages)"
+)
+
+# -----------------------------
+# 7) HEATMAP 4:
+# AIS GENES AVERAGED
+# -----------------------------
+hm_ais_avg <- zscore_rows(mat_avg[ais_present, , drop = FALSE])
+
+pheatmap::pheatmap(
+  hm_ais_avg,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 9,
+  angle_col = 45,
+  main = "AIS / genes (group averages)"
+)
+
+# -----------------------------
+# 8) HEATMAP 5:
+# PAIRED PAN VS NDEL BY STATE
+# -----------------------------
+pair_order <- c(
+  "Pan_Rest",   "Ndel_Rest",
+  "Pan_Active", "Ndel_Active",
+  "Pan_Inhibit","Ndel_Inhibit"
+)
+
+mat_pairs <- mat_avg[, pair_order, drop = FALSE]
+hm_ais_pairs <- zscore_rows(mat_pairs[ais_present, , drop = FALSE])
+
+pheatmap::pheatmap(
+  hm_ais_pairs,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 9,
+  angle_col = 45,
+  main = "AIS genes: Pan vs Ndel within each state"
+)
+
+# -----------------------------
+# 9) REPLICATE-LEVEL PAN vs NDEL WITHIN EACH STATE
+# -----------------------------
+
+plot_state_pan_vs_ndel <- function(state_keep, mat, coldata, genes, title_text) {
+  
+  # keep only samples from one state
+  keep <- coldata$state == state_keep
+  col_sub <- coldata[keep, , drop = FALSE]
+  mat_sub <- mat[, rownames(col_sub), drop = FALSE]
+  
+  # order columns: Pan first, then Ndel
+  col_sub <- col_sub[order(match(col_sub$bait, c("Pan", "Ndel"))), , drop = FALSE]
+  mat_sub <- mat_sub[, rownames(col_sub), drop = FALSE]
+  
+  # keep only genes present
+  genes_present <- intersect(genes, rownames(mat_sub))
+  plot_mat <- mat_sub[genes_present, , drop = FALSE]
+  
+  # z-score by gene
+  plot_z <- t(scale(t(plot_mat)))
+  plot_z[is.na(plot_z)] <- 0
+  
+  # annotation
+  ann <- col_sub[, c("bait", "state", "group"), drop = FALSE]
+  
+  pheatmap::pheatmap(
+    plot_z,
+    annotation_col = ann,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_rownames = TRUE,
+    fontsize_row = 9,
+    angle_col = 45,
+    main = title_text
+  )
+}
+
+# Rest
+plot_state_pan_vs_ndel(
+  state_keep = "Rest",
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Pan Rest vs Ndel Rest"
+)
+
+# Active
+plot_state_pan_vs_ndel(
+  state_keep = "Active",
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Pan Active vs Ndel Active"
+)
+
+# Inhibit
+plot_state_pan_vs_ndel(
+  state_keep = "Inhibit",
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Pan Inhibit vs Ndel Inhibit"
+)
+
+# -----------------------------
+# 10) REPLICATE-LEVEL NDEL STATE VS STATE
+# -----------------------------
+
+plot_ndel_state_comparison <- function(states_keep, mat, coldata, genes, title_text) {
+  
+  # keep only Ndel samples from the selected states
+  keep <- coldata$bait == "Ndel" & coldata$state %in% states_keep
+  col_sub <- coldata[keep, , drop = FALSE]
+  mat_sub <- mat[, rownames(col_sub), drop = FALSE]
+  
+  # order columns in the exact state order requested
+  col_sub$state <- factor(col_sub$state, levels = states_keep)
+  col_sub <- col_sub[order(col_sub$state), , drop = FALSE]
+  mat_sub <- mat_sub[, rownames(col_sub), drop = FALSE]
+  
+  # keep only genes present
+  genes_present <- intersect(genes, rownames(mat_sub))
+  plot_mat <- mat_sub[genes_present, , drop = FALSE]
+  
+  # z-score by gene
+  plot_z <- t(scale(t(plot_mat)))
+  plot_z[is.na(plot_z)] <- 0
+  
+  # annotation
+  ann <- col_sub[, c("bait", "state", "group"), drop = FALSE]
+  
+  pheatmap::pheatmap(
+    plot_z,
+    annotation_col = ann,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_rownames = TRUE,
+    fontsize_row = 9,
+    angle_col = 45,
+    main = title_text
+  )
+}
+
+# Ndel Rest vs Ndel Active
+plot_ndel_state_comparison(
+  states_keep = c("Rest", "Active"),
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Ndel Rest vs Ndel Active"
+)
+
+# Ndel Rest vs Ndel Inhibit
+plot_ndel_state_comparison(
+  states_keep = c("Rest", "Inhibit"),
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Ndel Rest vs Ndel Inhibit"
+)
+# Ndel Active vs Ndel Inhibit
+plot_ndel_state_comparison(
+  states_keep = c("Active", "Inhibit"),
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes by sample: Ndel Active vs Ndel Inhibit"
+)
+#----By averages----- 
+plot_ndel_state_comparison_avg <- function(states_keep, mat, coldata, genes, title_text) {
+  
+  keep <- coldata$bait == "Ndel" & coldata$state %in% states_keep
+  col_sub <- coldata[keep, , drop = FALSE]
+  mat_sub <- mat[, rownames(col_sub), drop = FALSE]
+  
+  group_order <- paste("Ndel", states_keep, sep = "_")
+  
+  avg_mat <- sapply(group_order, function(g) {
+    idx <- col_sub$group == g
+    rowMeans(mat_sub[, idx, drop = FALSE], na.rm = TRUE)
+  })
+  
+  avg_mat <- as.matrix(avg_mat)
+  colnames(avg_mat) <- group_order
+  
+  genes_present <- intersect(genes, rownames(avg_mat))
+  plot_mat <- avg_mat[genes_present, , drop = FALSE]
+  
+  plot_z <- t(scale(t(plot_mat)))
+  plot_z[is.na(plot_z)] <- 0
+  
+  pheatmap::pheatmap(
+    plot_z,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_rownames = TRUE,
+    fontsize_row = 9,
+    angle_col = 45,
+    main = title_text
+  )
+}
+
+plot_ndel_state_comparison_avg(
+  states_keep = c("Rest", "Active"),
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes averaged: Ndel Rest vs Ndel Active"
+)
+
+plot_ndel_state_comparison_avg(
+  states_keep = c("Rest", "Inhibit"),
+  mat = mat,
+  coldata = coldata,
+  genes = ais_genes,
+  title_text = "AIS genes averaged: Ndel Rest vs Ndel Inhibit"
+)
